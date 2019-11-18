@@ -1090,7 +1090,7 @@ device_types:
       guestfs_interface: 'virtio'
       machine: 'virt,gic-version=2'
     filters:
-      - passlist: {defconfig: ['defconfig']}
+      - passlist: {defconfig: ['defconfig', 'allmodconfig+KCONFIG_ALLCONFIG']}
 
   qemu_arm64-virt-gicv2-uefi:
     <<: *qemu_arm64-virt-gicv2
@@ -1108,7 +1108,7 @@ device_types:
       guestfs_interface: 'virtio'
       machine: 'virt,gic-version=3'
     filters:
-      - passlist: {defconfig: ['defconfig']}
+      - passlist: {defconfig: ['defconfig', 'allmodconfig+KCONFIG_ALLCONFIG']}
 
   qemu_arm64-virt-gicv3-uefi:
     <<: *qemu_arm64-virt-gicv3
