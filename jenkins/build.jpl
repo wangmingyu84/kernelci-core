@@ -164,7 +164,7 @@ node("docker" && params.NODE_LABEL) {
 */
 
 /* K8S build */
-node("docker" && "k8s" && params.NODE_LABEL) {
+node("docker" && params.NODE_LABEL) {
     def j = new Job()
     def kci_core = "${env.WORKSPACE}/kernelci-core"
     def k8s_context = "${env.K8S_CONTEXT}"
@@ -191,14 +191,14 @@ node("docker" && "k8s" && params.NODE_LABEL) {
 		sh(script: "gcloud container clusters list")
 		print("K8S: Azure clusters available:")
 		sh(script: "az aks list -o table")
-		
+
 		print("K8S context: ${k8s_context}.  Current nodes:")
 		sh(script: "kubectl --context ${k8s_context} get nodes")
 	    }
 
 	    stage("Build") {
 		timeout(time: 45, unit: 'MINUTES') {
-		    def k8s_job = sh(script:"DOCKER_IMAGE=${build_env_docker_image} ./templates/k8s/gen.py", 
+		    def k8s_job = sh(script:"DOCKER_IMAGE=${build_env_docker_image} ./templates/k8s/gen.py",
 				     returnStdout: true).trim()
 
 		    /* submit */
