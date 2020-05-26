@@ -206,7 +206,19 @@ node("docker" && params.NODE_LABEL) {
 		    sh(script: "kubectl --context ${k8s_context} describe -f ${k8s_job}.yaml || exit 0")
 
 		    /* Wait for pod to finish (will also dump logs and remove job) */
-		    sh(script: "./templates/k8s/wait.py --context ${k8s_context} --job-name ${k8s_job}")
+		    sh(script: "./templates/k8s/wait.py --context ${k8s_context} --job-name ${k8s_job} | tee ${k8s_job}.log")
+
+		    /* Find upload path */
+		    upload_path_line = sh(script: "grep \"^Upload path:\" ${k8s_job}.log",
+					  returnStdout: true).trim().tokenize(':')
+		    if (upload_path_line.size() > 0) {
+			upload_path = upload_path_line[1].trim()
+			print("Upload path: ${upload_path}")
+
+			sh(script: "wget -q http://storage.staging.kernelci.org/${upload_path}/bmeta.json")
+			sh(script: "wget -q http://storage.staging.kernelci.org/${upload_path}/dtbs.json")
+			archiveArtifacts("*.json")
+		    }
 		}
 	    }
 	}
