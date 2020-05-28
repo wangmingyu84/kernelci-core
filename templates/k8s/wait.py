@@ -141,7 +141,7 @@ def main(args):
     #
     # Delete job
     #
-    if args.delete:
+    if args.delete and k8s_success:
         # important: propagation_policy is important so any pods
         # created for a job deleted
         body = client.V1DeleteOptions(propagation_policy="Foreground")
