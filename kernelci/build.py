@@ -810,6 +810,29 @@ class MakeModules(Step):
         return res
 
 
+class MakeDeviceTrees(Step):
+
+    def dt_enabled(self):
+        """Check whether device tree support is enabled.
+
+        Return True if device tree support is enabled in the kernel config, or
+        False otherwise.  This can be used to not run this step and skip
+        building dtbs if they are not supported.
+        """
+        return self._kernel_config_enabled('OF_FLATTREE')
+
+    def run(self, jopt=None, verbose=False):
+        """Make the device trees
+
+        Make the device tree binary files (dtbs).  This step does not add any
+        extrabuild meta-data.
+
+        *jopt* is the `make -j` option which will default to `nproc + 2`
+        *verbose* is whether the build output should be shown
+        """
+        return self._run_make('dtbs', jopt, verbose)
+
+
 def _make_defconfig(defconfig, kwargs, extras, verbose, log_file):
     kdir, output_path = (kwargs.get(k) for k in ('kdir', 'output'))
     result = True
