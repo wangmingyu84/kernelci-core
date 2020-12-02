@@ -87,6 +87,13 @@ test_plans:
     filters:
       - blocklist: *kselftest_defconfig_filter
 
+  baseline-qemu-docker:
+    base_name: baseline
+    rootfs: buildroot_baseline_ramdisk
+    pattern: 'baseline/generic-qemu-baseline-template-docker.jinja2'
+    filters:
+      - blocklist: *kselftest_defconfig_filter
+
   baseline-fastboot:
     rootfs: buildroot_baseline_ramdisk
     pattern: 'baseline/generic-fastboot-baseline-template.jinja2'
@@ -2000,6 +2007,7 @@ test_configs:
   - device_type: qemu_arm-virt-gicv3
     test_plans:
       - baseline_qemu
+      - baseline-qemu-docker
       - v4l2-compliance-vivid
 
   - device_type: qemu_arm-virt-gicv3-uefi
@@ -2017,6 +2025,7 @@ test_configs:
   - device_type: qemu_arm64-virt-gicv3
     test_plans:
       - baseline_qemu
+      - baseline-qemu-docker
       - v4l2-compliance-vivid
 
   - device_type: qemu_arm64-virt-gicv3-uefi
@@ -2026,6 +2035,7 @@ test_configs:
   - device_type: qemu_i386
     test_plans:
       - baseline_qemu
+      - baseline-qemu-docker
 
   - device_type: qemu_i386-uefi
     test_plans:
@@ -2034,6 +2044,7 @@ test_configs:
   - device_type: qemu_x86_64
     test_plans:
       - baseline_qemu
+      - baseline-qemu-docker
       - v4l2-compliance-vivid
 
   - device_type: qemu_x86_64-uefi
