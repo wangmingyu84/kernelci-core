@@ -445,15 +445,16 @@ def _output_to_file(cmd, log_file, rel_dir=None):
     return cmd
 
 
-def _run_make(kdir, arch, target=None, jopt=None, silent=True, cc='gcc',
-              cross_compile=None, use_ccache=None, output=None, log_file=None,
-              opts=None, cross_compile_compat=None):
+def _run_make(subdir=None, arch=None, target=None, jopt=None, silent=True,
+              cc='gcc', cross_compile=None, use_ccache=None, output=None,
+              log_file=None, opts=None, cross_compile_compat=None):
     args = ['make']
 
     if opts:
         args += ['='.join([k, v]) for k, v in opts.items()]
 
-    args += ['-C{}'.format(kdir)]
+    if subdir:
+        args += ['-C{}'.format(subdir)]
 
     if jopt:
         args.append('-j{}'.format(jopt))
@@ -482,7 +483,7 @@ def _run_make(kdir, arch, target=None, jopt=None, silent=True, cc='gcc',
     elif cc != 'gcc':
         args.append('CC={}'.format(cc))
 
-    if output != kdir:
+    if subdir and (output != subdir):
         # due to kselftest Makefile issues, O= cannot be a relative path
         args.append('O={}'.format(os.path.abspath(output)))
 
@@ -597,15 +598,18 @@ class Step:
         cmd = 'grep -cq CONFIG_{}=y {}'.format(config_name, dot_config)
         return shell_cmd(cmd, True)
 
-    def _run_make(self, target, jopt=None, verbose=False, opts=None):
+    def _run_make(self, target, jopt=None, verbose=False, opts=None,
+                  reldir=None):
         env = self._bmeta['environment']
         make_opts = env['make_opts'].copy()
         if opts:
             make_opts.update(opts)
         if jopt is None:
             jopt = int(shell_cmd("nproc")) + 2
+        subdir = os.path.join(self._kdir, reldir) if reldir else self._kdir
+
         return _run_make(
-            self._kdir, env['arch'], target, jopt, not verbose,
+            subdir, env['arch'], target, jopt, not verbose,
             env['compiler'], env['cross_compile'], env['use_ccache'],
             self._output_path, self._log_path, make_opts,
             env['cross_compile_compat'])
@@ -911,6 +915,35 @@ class MakeDeviceTrees(Step):
         if res:
             self._dtbs_json()
         self._add_run_step('dtbs', jopt, res)
+        self._save_bmeta()
+        return res
+
+
+class MakeSelftests(Step):
+
+    def fragment_enabled(self):
+        """Check whether the kselftest fragment is enabled
+
+        Return True if the kselftest config fragment is enabled in the build
+        meta-data, or False otherwise.
+        """
+        return 'kselftest' in self._bmeta['kernel']['defconfig_extras']
+
+    def run(self, jopt=None, verbose=False):
+        """Make the kernel selftests
+
+        Make the kernel selftests or "kselftest" and produce a tarball so they
+        can be installed on a separate test platform.
+
+        *jopt* is the `make -j` option which will default to `nproc + 2`
+        *verbose* is whether the build output should be shown
+        """
+        make_opts = {
+            'FORMAT': '.xz',
+        }
+        res = self._run_make('gen_tar', jopt, verbose, make_opts,
+                             'tools/testing/selftests')
+        self._add_run_step('kselftest', jopt, res)
         self._save_bmeta()
         return res
 
