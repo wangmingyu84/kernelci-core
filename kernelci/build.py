@@ -593,18 +593,68 @@ class Step:
         cmd = 'grep -cq CONFIG_{}=y {}'.format(config_name, dot_config)
         return shell_cmd(cmd, True)
 
-    def _run_make(self, target, jopt=None, verbose=False, opts=None):
+    def _get_make_opts(self, opts, make_path):
         env = self._bmeta['environment']
         make_opts = env['make_opts'].copy()
         if opts:
             make_opts.update(opts)
+
+        arch = env['arch']
+        make_opts['ARCH'] = arch
+
+        cc = env['compiler']
+        if env['compiler'].startswith('clang'):
+            make_opts['LLVM'] = '1'
+        else:
+            make_opts['HOSTCC'] = cc
+
+        cross_compile = env['cross_compile']
+        if cross_compile:
+            make_opts['CROSS_COMPILE'] = cross_compile
+
+        cross_compile_compat = env['cross_compile_compat']
+        if cross_compile_compat:
+            make_opts['CROSS_COMPILE_COMPAT'] = cross_compile_compat
+
+        if env['use_ccache']:
+            px = cross_compile if cc == 'gcc' and cross_compile else ''
+            make_opts['CC'] = '"ccache {}{}"'.format(px, cc)
+            ccache_dir = '-'.join(['.ccache', arch, cc])
+            os.environ.setdefault('CCACHE_DIR', ccache_dir)
+        elif cc != 'gcc':
+            make_opts['CC'] = cc
+
+        if self._output_path and (self._output_path != make_path):
+            # due to kselftest Makefile issues, O= cannot be a relative path
+            make_opts['O'] = format(os.path.abspath(self._output_path))
+
+        return make_opts
+
+    def _run_make(self, target, jopt=None, verbose=False, opts=None,
+                  subdir=None):
+        make_path = os.path.join(self._kdir, subdir) if subdir else self._kdir
+        make_opts = self._get_make_opts(opts, make_path)
+
+        args = ['make']
+        args += ['='.join([k, v]) for k, v in make_opts.items()]
+        args += ['-C{}'.format(make_path)]
+
         if jopt is None:
             jopt = int(shell_cmd("nproc")) + 2
-        return _run_make(
-            self._kdir, env['arch'], target, jopt, not verbose,
-            env['compiler'], env['cross_compile'], env['use_ccache'],
-            self._output_path, self._log_path, make_opts,
-            env['cross_compile_compat'])
+        if jopt:
+            args.append('-j{}'.format(jopt))
+
+        if not verbose:
+            args.append('-s')
+
+        if target:
+            args.append(target)
+
+        cmd = ' '.join(args)
+        print_flush(cmd)
+        if self._log_path:
+            cmd = _output_to_file(cmd, self._log_path)
+        return shell_cmd(cmd, True)
 
     def run(self):
         """Abstract method to run the build step."""
