@@ -597,18 +597,76 @@ class Step:
         cmd = 'grep -cq CONFIG_{}=y {}'.format(config_name, dot_config)
         return shell_cmd(cmd, True)
 
-    def _run_make(self, target, jopt=None, verbose=False, opts=None):
+    def _output_to_file(self, cmd, log_file, rel_path=None):
+        open(log_file, 'a').write("#\n# {}\n#\n".format(cmd))
+        if rel_path:
+            log_file = os.path.relpath(log_file, rel_path)
+        cmd = "/bin/bash -c '(set -o pipefail; {} 2>&1 | tee -a {})'".format(
+            cmd, log_file)
+        return cmd
+
+    def _get_make_opts(self, opts, make_path):
         env = self._bmeta['environment']
         make_opts = env['make_opts'].copy()
         if opts:
             make_opts.update(opts)
+
+        arch = env['arch']
+        make_opts['ARCH'] = arch
+
+        cc = env['compiler']
+        if env['compiler'].startswith('clang'):
+            make_opts['LLVM'] = '1'
+        else:
+            make_opts['HOSTCC'] = cc
+
+        cross_compile = env['cross_compile']
+        if cross_compile:
+            make_opts['CROSS_COMPILE'] = cross_compile
+
+        cross_compile_compat = env['cross_compile_compat']
+        if cross_compile_compat:
+            make_opts['CROSS_COMPILE_COMPAT'] = cross_compile_compat
+
+        if env['use_ccache']:
+            px = cross_compile if cc == 'gcc' and cross_compile else ''
+            make_opts['CC'] = '"ccache {}{}"'.format(px, cc)
+            ccache_dir = '-'.join(['.ccache', arch, cc])
+            os.environ.setdefault('CCACHE_DIR', ccache_dir)
+        elif cc != 'gcc':
+            make_opts['CC'] = cc
+
+        if self._output_path and (self._output_path != make_path):
+            # due to kselftest Makefile issues, O= cannot be a relative path
+            make_opts['O'] = format(os.path.abspath(self._output_path))
+
+        return make_opts
+
+    def _run_make(self, target, jopt=None, verbose=False, opts=None,
+                  subdir=None):
+        make_path = os.path.join(self._kdir, subdir) if subdir else self._kdir
+        make_opts = self._get_make_opts(opts, make_path)
+
+        args = ['make']
+        args += ['='.join([k, v]) for k, v in make_opts.items()]
+        args += ['-C{}'.format(make_path)]
+
         if jopt is None:
             jopt = int(shell_cmd("nproc")) + 2
-        return _run_make(
-            self._kdir, env['arch'], target, jopt, not verbose,
-            env['compiler'], env['cross_compile'], env['use_ccache'],
-            self._output_path, self._log_path, make_opts,
-            env['cross_compile_compat'])
+        if jopt:
+            args.append('-j{}'.format(jopt))
+
+        if not verbose:
+            args.append('-s')
+
+        if target:
+            args.append(target)
+
+        cmd = ' '.join(args)
+        print_flush(cmd)
+        if self._log_path:
+            cmd = self._output_to_file(cmd, self._log_path)
+        return shell_cmd(cmd, True)
 
     def run(self):
         """Abstract method to run the build step."""
@@ -740,7 +798,7 @@ scripts/kconfig/merge_config.sh -O {output} '{base}' '{frag}' {redir}
            redir='> /dev/null' if not verbose else '')
         print_flush(cmd.strip())
         if self._log_path:
-            cmd = _output_to_file(cmd, self._log_path, self._kdir)
+            cmd = self._output_to_file(cmd, self._log_path, self._kdir)
         return shell_cmd(cmd, True)
 
     def run(self, defconfig, jopt=None, verbose=False, frag='kernelci.config'):
@@ -911,6 +969,35 @@ class MakeDeviceTrees(Step):
         if res:
             self._dtbs_json()
         self._add_run_step('dtbs', jopt, res)
+        self._save_bmeta()
+        return res
+
+
+class MakeSelftests(Step):
+
+    def fragment_enabled(self):
+        """Check whether the kselftest fragment is enabled
+
+        Return True if the kselftest config fragment is enabled in the build
+        meta-data, or False otherwise.
+        """
+        return 'kselftest' in self._bmeta['kernel']['defconfig_extras']
+
+    def run(self, jopt=None, verbose=False):
+        """Make the kernel selftests
+
+        Make the kernel selftests or "kselftest" and produce a tarball so they
+        can be installed on a separate test platform.
+
+        *jopt* is the `make -j` option which will default to `nproc + 2`
+        *verbose* is whether the build output should be shown
+        """
+        make_opts = {
+            'FORMAT': '.xz',
+        }
+        res = self._run_make('gen_tar', jopt, verbose, make_opts,
+                             'tools/testing/selftests')
+        self._add_run_step('kselftest', jopt, res)
         self._save_bmeta()
         return res
 
