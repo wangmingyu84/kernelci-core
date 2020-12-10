@@ -1,4 +1,4 @@
-# Copyright (C) 2018, 2019 Collabora Limited
+# Copyright (C) 2018, 2019, 2020 Collabora Limited
 # Author: Guillaume Tucker <guillaume.tucker@collabora.com>
 #
 # This module is free software; you can redistribute it and/or modify it under
@@ -490,6 +490,400 @@ def _run_make(kdir, arch, target=None, jopt=None, silent=True, cc='gcc',
     if log_file:
         cmd = _output_to_file(cmd, log_file)
     return shell_cmd(cmd, True)
+
+
+class Step:
+    """Kernel build step"""
+
+    def __init__(self, kdir, output_path=None, log=None, reset=False):
+        """Each Step deals with a part of the build and its related meta-data
+
+        This abstract class handles the common code to run any kernel build
+        step, such as running `make`, managing log files or checking whether
+        some kernel config options are enabled.  It uses the `bmeta.json` file
+        to share meta-data between each step and later on when sending the
+        build to a database.
+
+        Each concrete class should implement the `run()` method, with arbitrary
+        arguments to perform their dedicated tasks.
+
+        *kdir* is the path to the kernel source tree directory
+        *output_path* is the path to the build output directory
+        *log* is the name of the log file within the output directory
+        *reset* is whether the meta-data should be reset in this step
+        """
+        self._kdir = kdir
+        self._output_path = output_path or os.path.join(kdir, 'build')
+        self._bmeta_path = os.path.join(self._output_path, 'bmeta.json')
+        self._log_file = log
+        self._log_path = os.path.join(self._output_path, log) if log else None
+        self._bmeta = dict()
+        self._dot_config = None
+        self._start_time = time.time()
+        if not os.path.exists(self._output_path):
+            os.mkdir(self._output_path)
+        elif os.path.exists(self._bmeta_path):
+            if reset:
+                os.unlink(self._bmeta_path)
+            else:
+                with open(self._bmeta_path) as json_file:
+                    self._bmeta = json.load(json_file)
+
+    @property
+    def bmeta_path(self):
+        """Path to the build meta-data JSON file"""
+        return self._bmeta_path
+
+    def _add_run_bmeta(self, name, jopt=None, status=None):
+        run_data = {
+            'name': name,
+            'start_time': self._start_time,
+            'duration': time.time() - self._start_time,
+        }
+        if jopt is not None:
+            run_data['threads'] = str(jopt)
+        if status is not None:
+            run_data['status'] = "PASS" if status is True else "FAIL"
+        if self._log_path and os.path.exists(self._log_path):
+            run_data['log_file'] = self._log_file
+        self._bmeta.setdefault('steps', list()).append(run_data)
+
+    def _save_bmeta(self):
+        with open(self._bmeta_path, 'w') as json_file:
+            json.dump(self._bmeta, json_file, indent=4, sort_keys=True)
+
+    def _kernel_config_enabled(self, config_name):
+        dot_config = os.path.join(self._output_path, '.config')
+        cmd = 'grep -cq CONFIG_{}=y {}'.format(config_name, dot_config)
+        return shell_cmd(cmd, True)
+
+    def _run_make(self, target, jopt=None, verbose=False, opts=None):
+        env = self._bmeta['environment']
+        make_opts = env['make_opts'].copy()
+        if opts:
+            make_opts.update(opts)
+        if jopt is None:
+            jopt = int(shell_cmd("nproc")) + 2
+        return _run_make(
+            self._kdir, env['arch'], target, jopt, not verbose,
+            env['compiler'], env['cross_compile'], env['use_ccache'],
+            self._output_path, self._log_path, make_opts,
+            env['cross_compile_compat'])
+
+    def run(self):
+        """Abstract method to run the build step."""
+        raise NotImplementedError("Step.run() needs to be implemented.")
+
+
+class RevisionData(Step):
+
+    def run(self, tree_name, tree_url, branch):
+        """Add all the meta-data related to the current kernel revision.
+
+        This step retrieves the revision information from the current kernel
+        source directory using Git, typically to initialise `bmeta.json` file
+        with just a revision section before running any actual build step.
+
+        *tree_name* is the short name of the kernel tree e.g. mainline, next...
+        *tree_url* is the URL of the remote Git repository for the tree
+        *branch* is the name of the Git branch
+        """
+        self._bmeta['revision'] = {
+            'tree': tree_name,
+            'url': tree_url,
+            'branch': branch,
+            'describe': git_describe(tree_name, self._kdir),
+            'describe_v': git_describe_verbose(self._kdir),
+            'commit': head_commit(self._kdir),
+        }
+        self._add_run_bmeta('revision', status=True)
+        self._save_bmeta()
+        return True
+
+
+class EnvironmentData(Step):
+
+    def run(self, build_env, arch):
+        """Add all the meta-data related to the current build.
+
+        This step relies on a BuildEnvironment object and also queries any
+        currently installed compiler toolchain to populate the build
+        environment section of the `bmeta.json` file.
+
+        *build_env* is a BuildEnvironment object
+        *arch* is the CPU architecture name e.g. x86_64, arm64, riscv...
+        """
+        cross_compile = build_env.get_cross_compile(arch) or ''
+        cross_compile_compat = build_env.get_cross_compile_compat(arch) or ''
+        cc = build_env.cc
+        cc_version_cmd = "{}{} --version 2>&1".format(
+            cross_compile if cross_compile and cc == 'gcc' else '', cc)
+        cc_version_full = shell_cmd(cc_version_cmd).splitlines()[0]
+        make_opts = {'KBUILD_BUILD_USER': 'KernelCI'}
+        make_opts.update(build_env.get_arch_opts(arch))
+        platform_data = {'uname': platform.uname()}
+        if os.path.exists('/proc/cpuinfo'):
+            cpu_list = []
+            with open('/proc/cpuinfo') as f:
+                for line in f:
+                    if 'model name' in line:
+                        cpu_list.append(line.split(':')[1].strip())
+            cpus = {}
+            for cpu in cpu_list:
+                ncpus = cpus.get(cpu, 0)
+                cpus[cpu] = ncpus + 1
+            platform_data['cpus'] = cpus
+
+        self._bmeta['environment'] = {
+            'arch': arch,
+            'compiler': cc,
+            'compiler_version': build_env.cc_version,
+            'compiler_version_full': cc_version_full,
+            'cross_compile': cross_compile,
+            'cross_compile_compat': cross_compile_compat,
+            'name': build_env.name,
+            'platform': platform_data,
+            'use_ccache': shell_cmd("which ccache > /dev/null", True),
+            'make_opts': make_opts,
+        }
+        self._add_run_bmeta('environment', status=True)
+        self._save_bmeta()
+        return True
+
+
+class MakeConfig(Step):
+
+    def _parse_elements(self, elements):
+        opts = dict()
+        configs = list()
+        fragments = dict()
+        extras = list()
+
+        for ele in elements:
+            if ele.startswith('KCONFIG_'):
+                config, value = ele.split('=')
+                opts[config] = value
+                extras.append(ele)
+            elif ele.startswith('CONFIG_'):
+                configs.append(ele)
+                extras.append(ele)
+            else:
+                frag_path = os.path.join(self._kdir, ele)
+                frag_name = os.path.basename(os.path.splitext(ele)[0])
+                fragments[frag_name] = frag_path
+                extras.append(frag_name)
+
+        return opts, configs, fragments, extras
+
+    def _gen_kci_frag(self, configs, fragments, name):
+        kci_frag_path = os.path.join(self._output_path, name)
+        with open(kci_frag_path, 'w') as kci_frag:
+            for config in configs:
+                kci_frag.write(config + '\n')
+            for name, path in fragments.items():
+                with open(path) as frag:
+                    kci_frag.write("\n# fragment from : {}\n".format(name))
+                    kci_frag.writelines(frag)
+
+    def _merge_config(self, kci_frag_name, verbose=False):
+        rel_path = os.path.relpath(self._output_path, self._kdir)
+        env = self._bmeta['environment']
+        cc = env['compiler']
+        cc_env = (
+            "export LLVM=1" if cc.startswith('clang') else
+            "export HOSTCC={cc}\nexport CC={cc}".format(cc=cc)
+        )
+        cmd = """
+set -e
+cd {kdir}
+{cc_env}
+export ARCH={arch}
+export CROSS_COMPILE={cross}
+export CROSS_COMPILE_COMPAT={cross_compat}
+export LLVM_IAS={llvm_ias}
+scripts/kconfig/merge_config.sh -O {output} '{base}' '{frag}' {redir}
+""".format(kdir=self._kdir, arch=env['arch'], cc_env=cc_env,
+           cross=env['cross_compile'], output=rel_path,
+           cross_compat=env['cross_compile_compat'],
+           llvm_ias=env['make_opts'].get('LLVM_IAS', ''),
+           base=os.path.join(rel_path, '.config'),
+           frag=os.path.join(rel_path, kci_frag_name),
+           redir='> /dev/null' if not verbose else '')
+        print_flush(cmd.strip())
+        if self._log_path:
+            cmd = _output_to_file(cmd, self._log_path, self._kdir)
+        return shell_cmd(cmd, True)
+
+    def run(self, defconfig, jopt=None, verbose=False, frag='kernelci.config'):
+        """Make the kernel config
+
+        Make the kernel .config file using a number of options.  This will
+        first use a given defconfig, then use the KernelCI extended syntax for
+        enabling or disabling any extra kernel build options defined or merge
+        any config fragment files.  Finally it will save the extra config
+        options in a separate config fragment called `kernelci.config` by
+        default.  The "kernel" section in `bmeta.json` will be created with the
+        defconfig name and other related meta-data about extra config options
+        and fragments.
+
+        *defconfig* is the defconfig name, e.g. defconfig, x86_64_defconfig...
+        *jopt* is the `make -j` option which will default to `nproc + 2`
+        *verbose* is whether the build output should be shown
+        *frag* is the name of the output kernel config fragment
+        """
+        elements = defconfig.split('+')
+        target = elements.pop(0)
+        kci_frag_name = None
+        opts, configs, fragments, extras = self._parse_elements(elements)
+
+        if configs or fragments:
+            kci_frag_name = frag
+            self._gen_kci_frag(configs, fragments, kci_frag_name)
+
+        self._bmeta['kernel'] = {
+            'defconfig': target,
+            'defconfig_full': defconfig,
+            'defconfig_extras': extras,
+        }
+
+        res = self._run_make(target, jopt, verbose, opts)
+
+        if res and kci_frag_name:
+            # ToDo: treat kernelci.config as an implementation detail and list
+            # the actual input config fragment files here instead
+            self._bmeta['kernel']['fragments'] = [kci_frag_name]
+            res = self._merge_config(kci_frag_name, verbose)
+
+        self._add_run_bmeta('config', jopt, res)
+        self._save_bmeta()
+        return res
+
+
+class MakeKernel(Step):
+
+    def run(self, jopt=None, verbose=False):
+        """Make the kernel image
+
+        Make the actual kernel image given the parameters already provided in
+        previous steps via `bmeta.json`.  This will also add some meta-data
+        such as the kernel image name and ELF properties.
+
+        *jopt* is the `make -j` option which will default to `nproc + 2`
+        *verbose* is whether the build output should be shown
+        """
+        if self._kernel_config_enabled('XIP_KERNEL'):
+            target = 'xipImage'
+        elif self._kernel_config_enabled('SYS_SUPPORTS_ZBOOT'):
+            target = 'vmlinuz'
+        else:
+            env = self._bmeta['environment']
+            target = MAKE_TARGETS.get(env['arch'])
+
+        kbmeta = self._bmeta.setdefault('kernel', dict())
+        kbmeta['image'] = target
+
+        res = self._run_make(target, jopt, verbose)
+
+        if res:
+            vmlinux_file = os.path.join(self._output_path, 'vmlinux')
+            if os.path.isfile(vmlinux_file):
+                vmlinux_meta = kernelci.elf.read(vmlinux_file)
+                kbmeta.update(vmlinux_meta)
+                kbmeta['vmlinux_file_size'] = os.stat(vmlinux_file).st_size
+
+        self._add_run_bmeta('kernel', jopt, res)
+        self._save_bmeta()
+        return res
+
+
+class MakeModules(Step):
+
+    def modules_enabled(self):
+        """Check whether modules are enabled.
+
+        Return True if the modules are enabled in the kernel config file, or
+        False otherwise.  This can be used to determine whether the step should
+        be run or not, prior to running it.
+        """
+        return self._kernel_config_enabled('MODULES')
+
+    def run(self, mod_path=None, jopt=None, verbose=False):
+        """Make the kernel modules
+
+        Make the kernel modules and install them as stripped binaries in
+        *mod_path*, which defaults to _modules_ within the output directory.
+        This step does not add any extra build meta-data.
+
+        *mod_path* is the path to the output kernel modules directory.
+        *jopt* is the `make -j` option which will default to `nproc + 2`
+        *verbose* is whether the build output should be shown
+        """
+        res = self._run_make('modules', jopt, verbose)
+
+        if res:
+            if not mod_path:
+                mod_path = os.path.join(self._output_path, '_modules_')
+            if os.path.exists(mod_path):
+                shutil.rmtree(mod_path)
+            os.makedirs(mod_path)
+            cross_compile = self._bmeta['environment']['cross_compile']
+            opts = {
+                'INSTALL_MOD_PATH': os.path.abspath(mod_path),
+                'INSTALL_MOD_STRIP': '1',
+                'STRIP': "{}strip".format(cross_compile),
+            }
+            res = self._run_make('modules_install', jopt, verbose, opts)
+
+        self._add_run_bmeta('modules', jopt, res)
+        self._save_bmeta()
+        return res
+
+
+class MakeDeviceTrees(Step):
+
+    def dt_enabled(self):
+        """Check whether device tree support is enabled.
+
+        Return True if device tree support is enabled in the kernel config, or
+        False otherwise.  This can be used to not run this step and skip
+        building dtbs if they are not supported.
+        """
+        return self._kernel_config_enabled('OF_FLATTREE')
+
+    def _dtbs_json(self):
+        arch = self._bmeta['environment']['arch']
+        boot_dir = os.path.join(self._output_path, 'arch', arch, 'boot')
+        dts_dir = os.path.join(boot_dir, 'dts')
+        dtbs_path = os.path.join(self._output_path, '_dtbs_')
+        dtb_list = []
+        for root, _, files in os.walk(dts_dir):
+            for f in fnmatch.filter(files, '*.dtb'):
+                dtb_path = os.path.join(root, f)
+                dtb_rel = os.path.relpath(dtb_path, dts_dir)
+                dtb_list.append(dtb_rel)
+                dest_path = os.path.join(dtbs_path, dtb_rel)
+                dest_dir = os.path.dirname(dest_path)
+                if not os.path.exists(dest_dir):
+                    os.makedirs(dest_dir)
+                shutil.copy(dtb_path, dest_path)
+        with open(os.path.join(self._output_path, 'dtbs.json'), 'w') as f:
+            json.dump({'dtbs': sorted(dtb_list)}, f, indent=4)
+
+    def run(self, jopt=None, verbose=False):
+        """Make the device trees
+
+        Make the device tree binary files (dtbs).  This step does not add any
+        extrabuild meta-data.
+
+        *jopt* is the `make -j` option which will default to `nproc + 2`
+        *verbose* is whether the build output should be shown
+        """
+        res = self._run_make('dtbs', jopt, verbose)
+        if res:
+            self._dtbs_json()
+        self._add_run_bmeta('dtbs', jopt, res)
+        self._save_bmeta()
+        return res
 
 
 def _make_defconfig(defconfig, kwargs, extras, verbose, log_file):
