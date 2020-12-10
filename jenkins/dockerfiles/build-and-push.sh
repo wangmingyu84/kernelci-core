@@ -40,6 +40,7 @@ do
     d )  debos=true;;
     i )  dt_validation=true;;
     k )  k8s=true;;
+    Q )  qemu=true;;
     q )  quiet="--quiet";;
     t )  tag_px=$OPTARG;;
     \? )
@@ -115,6 +116,18 @@ then
   tag=${tag_px}build-k8s
   echo_build $tag
   docker build ${quiet} ${cache_args} build-k8s -t $tag
+  if [ "x${push}" == "xtrue" ]
+  then
+    echo_push $tag
+    docker push $tag
+  fi
+fi
+
+if [ "x${qemu}" == "xtrue" ]
+then
+  tag=${tag_px}qemu
+  echo_build $tag
+  docker build ${quiet} ${cache_args} qemu -t $tag
   if [ "x${push}" == "xtrue" ]
   then
     echo_push $tag
