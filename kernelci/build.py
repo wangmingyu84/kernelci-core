@@ -15,6 +15,7 @@
 # along with this library; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
 
+from datetime import datetime
 import fnmatch
 import itertools
 import json
@@ -519,30 +520,46 @@ class Step:
         self._kdir = kdir
         self._output_path = output_path or os.path.join(kdir, 'build')
         self._bmeta_path = os.path.join(self._output_path, 'bmeta.json')
+        self._steps_path = os.path.join(self._output_path, 'steps.json')
         self._log_file = log
         self._log_path = os.path.join(self._output_path, log) if log else None
         self._bmeta = dict()
+        self._steps = list()
         self._dot_config = None
         self._start_time = time.time()
         if not os.path.exists(self._output_path):
             os.mkdir(self._output_path)
-        elif os.path.exists(self._bmeta_path):
-            if reset:
-                os.unlink(self._bmeta_path)
-            else:
-                with open(self._bmeta_path) as json_file:
-                    self._bmeta = json.load(json_file)
+        elif reset:
+            self._reset_bmeta()
+        else:
+            self._load_bmeta()
 
     @property
     def bmeta_path(self):
         """Path to the build meta-data JSON file"""
         return self._bmeta_path
 
-    def _add_run_bmeta(self, name, jopt=None, status=None):
+    def _reset_bmeta(self):
+        if os.path.exists(self._bmeta_path):
+            os.unlink(self._bmeta_path)
+        if os.path.exists(self._steps_path):
+            os.unlink(self._steps_path)
+
+    def _load_bmeta(self):
+        if os.path.exists(self._bmeta_path):
+            with open(self._bmeta_path) as json_file:
+                self._bmeta = json.load(json_file)
+        if os.path.exists(self._steps_path):
+            with open(self._steps_path) as json_file:
+                self._steps = json.load(json_file)
+
+    def _add_run_step(self, name, jopt=None, status=None):
+        start_time = datetime.fromtimestamp(self._start_time).isoformat()
         run_data = {
             'name': name,
-            'start_time': self._start_time,
+            'start_time': start_time,
             'duration': time.time() - self._start_time,
+            'cpus': self._get_cpus(),
         }
         if jopt is not None:
             run_data['threads'] = str(jopt)
@@ -550,29 +567,115 @@ class Step:
             run_data['status'] = "PASS" if status is True else "FAIL"
         if self._log_path and os.path.exists(self._log_path):
             run_data['log_file'] = self._log_file
-        self._bmeta.setdefault('steps', list()).append(run_data)
+        self._steps.append(run_data)
+
+        total_duration = sum(s['duration'] for s in self._steps)
+        all_status = set(s['status'] for s in self._steps)
+        self._bmeta['build'] = {
+            'duration': total_duration,
+            'status': 'PASS' if all_status == {'PASS'} else 'FAIL'
+        }
 
     def _save_bmeta(self):
         with open(self._bmeta_path, 'w') as json_file:
             json.dump(self._bmeta, json_file, indent=4, sort_keys=True)
+        with open(self._steps_path, 'w') as json_file:
+            json.dump(self._steps, json_file, indent=4, sort_keys=True)
+
+    def _get_cpus(self):
+        cpus = {}
+        if os.path.exists('/proc/cpuinfo'):
+            cpu_list = []
+            with open('/proc/cpuinfo') as f:
+                for line in f:
+                    if 'model name' in line:
+                        cpu_list.append(line.split(':')[1].strip())
+            for cpu in cpu_list:
+                ncpus = cpus.get(cpu, 0)
+                cpus[cpu] = ncpus + 1
+        return cpus
 
     def _kernel_config_enabled(self, config_name):
         dot_config = os.path.join(self._output_path, '.config')
         cmd = 'grep -cq CONFIG_{}=y {}'.format(config_name, dot_config)
         return shell_cmd(cmd, True)
 
-    def _run_make(self, target, jopt=None, verbose=False, opts=None):
+    def _output_to_file(self, cmd, file_path, rel_path=None):
+        with open(file_path, 'a') as output_file:
+            output = ["#\n"]
+            if self._start_time:
+                dt = datetime.fromtimestamp(time.time())
+                output.append("# {}\n#\n".format(dt.isoformat()))
+            output.append("# {}\n".format(cmd))
+            output.append("#\n")
+            output_file.write("".join(output))
+        if rel_path:
+            file_path = os.path.relpath(file_path, rel_path)
+        cmd = "/bin/bash -c '(set -o pipefail; {} 2>&1 | tee -a {})'".format(
+            cmd, file_path)
+        return cmd
+
+    def _get_make_opts(self, opts, make_path):
         env = self._bmeta['environment']
         make_opts = env['make_opts'].copy()
         if opts:
             make_opts.update(opts)
+
+        arch = env['arch']
+        make_opts['ARCH'] = arch
+
+        cc = env['compiler']
+        if env['compiler'].startswith('clang'):
+            make_opts['LLVM'] = '1'
+        else:
+            make_opts['HOSTCC'] = cc
+
+        cross_compile = env['cross_compile']
+        if cross_compile:
+            make_opts['CROSS_COMPILE'] = cross_compile
+
+        cross_compile_compat = env['cross_compile_compat']
+        if cross_compile_compat:
+            make_opts['CROSS_COMPILE_COMPAT'] = cross_compile_compat
+
+        if env['use_ccache']:
+            px = cross_compile if cc == 'gcc' and cross_compile else ''
+            make_opts['CC'] = '"ccache {}{}"'.format(px, cc)
+            ccache_dir = '-'.join(['.ccache', arch, cc])
+            os.environ.setdefault('CCACHE_DIR', ccache_dir)
+        elif cc != 'gcc':
+            make_opts['CC'] = cc
+
+        if self._output_path and (self._output_path != make_path):
+            # due to kselftest Makefile issues, O= cannot be a relative path
+            make_opts['O'] = format(os.path.abspath(self._output_path))
+
+        return make_opts
+
+    def _make(self, target, jopt=None, verbose=False, opts=None, subdir=None):
+        make_path = os.path.join(self._kdir, subdir) if subdir else self._kdir
+        make_opts = self._get_make_opts(opts, make_path)
+
+        args = ['make']
+        args += ['='.join([k, v]) for k, v in make_opts.items()]
+        args += ['-C{}'.format(make_path)]
+
         if jopt is None:
             jopt = int(shell_cmd("nproc")) + 2
-        return _run_make(
-            self._kdir, env['arch'], target, jopt, not verbose,
-            env['compiler'], env['cross_compile'], env['use_ccache'],
-            self._output_path, self._log_path, make_opts,
-            env['cross_compile_compat'])
+        if jopt:
+            args.append('-j{}'.format(jopt))
+
+        if not verbose:
+            args.append('-s')
+
+        if target:
+            args.append(target)
+
+        cmd = ' '.join(args)
+        print_flush(cmd)
+        if self._log_path:
+            cmd = self._output_to_file(cmd, self._log_path)
+        return shell_cmd(cmd, True)
 
     def run(self):
         """Abstract method to run the build step."""
@@ -600,7 +703,7 @@ class RevisionData(Step):
             'describe_v': git_describe_verbose(self._kdir),
             'commit': head_commit(self._kdir),
         }
-        self._add_run_bmeta('revision', status=True)
+        self._add_run_step('revision', status=True)
         self._save_bmeta()
         return True
 
@@ -626,17 +729,6 @@ class EnvironmentData(Step):
         make_opts = {'KBUILD_BUILD_USER': 'KernelCI'}
         make_opts.update(build_env.get_arch_opts(arch))
         platform_data = {'uname': platform.uname()}
-        if os.path.exists('/proc/cpuinfo'):
-            cpu_list = []
-            with open('/proc/cpuinfo') as f:
-                for line in f:
-                    if 'model name' in line:
-                        cpu_list.append(line.split(':')[1].strip())
-            cpus = {}
-            for cpu in cpu_list:
-                ncpus = cpus.get(cpu, 0)
-                cpus[cpu] = ncpus + 1
-            platform_data['cpus'] = cpus
 
         self._bmeta['environment'] = {
             'arch': arch,
@@ -650,7 +742,7 @@ class EnvironmentData(Step):
             'use_ccache': shell_cmd("which ccache > /dev/null", True),
             'make_opts': make_opts,
         }
-        self._add_run_bmeta('environment', status=True)
+        self._add_run_step('environment', status=True)
         self._save_bmeta()
         return True
 
@@ -715,7 +807,7 @@ scripts/kconfig/merge_config.sh -O {output} '{base}' '{frag}' {redir}
            redir='> /dev/null' if not verbose else '')
         print_flush(cmd.strip())
         if self._log_path:
-            cmd = _output_to_file(cmd, self._log_path, self._kdir)
+            cmd = self._output_to_file(cmd, self._log_path, self._kdir)
         return shell_cmd(cmd, True)
 
     def run(self, defconfig, jopt=None, verbose=False, frag='kernelci.config'):
@@ -750,7 +842,7 @@ scripts/kconfig/merge_config.sh -O {output} '{base}' '{frag}' {redir}
             'defconfig_extras': extras,
         }
 
-        res = self._run_make(target, jopt, verbose, opts)
+        res = self._make(target, jopt, verbose, opts)
 
         if res and kci_frag_name:
             # ToDo: treat kernelci.config as an implementation detail and list
@@ -758,7 +850,7 @@ scripts/kconfig/merge_config.sh -O {output} '{base}' '{frag}' {redir}
             self._bmeta['kernel']['fragments'] = [kci_frag_name]
             res = self._merge_config(kci_frag_name, verbose)
 
-        self._add_run_bmeta('config', jopt, res)
+        self._add_run_step('config', jopt, res)
         self._save_bmeta()
         return res
 
@@ -786,7 +878,7 @@ class MakeKernel(Step):
         kbmeta = self._bmeta.setdefault('kernel', dict())
         kbmeta['image'] = target
 
-        res = self._run_make(target, jopt, verbose)
+        res = self._make(target, jopt, verbose)
 
         if res:
             vmlinux_file = os.path.join(self._output_path, 'vmlinux')
@@ -795,7 +887,7 @@ class MakeKernel(Step):
                 kbmeta.update(vmlinux_meta)
                 kbmeta['vmlinux_file_size'] = os.stat(vmlinux_file).st_size
 
-        self._add_run_bmeta('kernel', jopt, res)
+        self._add_run_step('kernel', jopt, res)
         self._save_bmeta()
         return res
 
@@ -822,7 +914,7 @@ class MakeModules(Step):
         *jopt* is the `make -j` option which will default to `nproc + 2`
         *verbose* is whether the build output should be shown
         """
-        res = self._run_make('modules', jopt, verbose)
+        res = self._make('modules', jopt, verbose)
 
         if res:
             if not mod_path:
@@ -836,9 +928,9 @@ class MakeModules(Step):
                 'INSTALL_MOD_STRIP': '1',
                 'STRIP': "{}strip".format(cross_compile),
             }
-            res = self._run_make('modules_install', jopt, verbose, opts)
+            res = self._make('modules_install', jopt, verbose, opts)
 
-        self._add_run_bmeta('modules', jopt, res)
+        self._add_run_step('modules', jopt, res)
         self._save_bmeta()
         return res
 
@@ -882,10 +974,39 @@ class MakeDeviceTrees(Step):
         *jopt* is the `make -j` option which will default to `nproc + 2`
         *verbose* is whether the build output should be shown
         """
-        res = self._run_make('dtbs', jopt, verbose)
+        res = self._make('dtbs', jopt, verbose)
         if res:
             self._dtbs_json()
-        self._add_run_bmeta('dtbs', jopt, res)
+        self._add_run_step('dtbs', jopt, res)
+        self._save_bmeta()
+        return res
+
+
+class MakeSelftests(Step):
+
+    def fragment_enabled(self):
+        """Check whether the kselftest fragment is enabled
+
+        Return True if the kselftest config fragment is enabled in the build
+        meta-data, or False otherwise.
+        """
+        return 'kselftest' in self._bmeta['kernel']['defconfig_extras']
+
+    def run(self, jopt=None, verbose=False):
+        """Make the kernel selftests
+
+        Make the kernel selftests or "kselftest" and produce a tarball so they
+        can be installed on a separate test platform.
+
+        *jopt* is the `make -j` option which will default to `nproc + 2`
+        *verbose* is whether the build output should be shown
+        """
+        opts = {
+            'FORMAT': '.xz',
+        }
+        res = self._make('gen_tar', jopt, verbose, opts,
+                         'tools/testing/selftests')
+        self._add_run_step('kselftest', jopt, res)
         self._save_bmeta()
         return res
 
