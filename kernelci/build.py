@@ -535,11 +535,6 @@ class Step:
         self._status = None
 
     @property
-    def bmeta_path(self):
-        """Path to the build meta-data JSON file"""
-        return self._bmeta_path
-
-    @property
     def install_path(self):
         """Path to the installation directory"""
         return self._install_path
