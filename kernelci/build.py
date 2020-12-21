@@ -873,6 +873,23 @@ scripts/kconfig/merge_config.sh -O {output} '{base}' '{frag}' {redir}
         self._save_bmeta()
         return res
 
+    def install(self, verbose=False):
+        if not super().install(verbose):
+            return False
+
+        self._install_file(
+            os.path.join(self._output_path, '.config'),
+            'kernel.config',
+            verbose
+        )
+
+        for frag in self._bmeta['kernel'].get('fragments', list()):
+            self._install_file(
+                os.path.join(self._output_path, frag), frag, verbose
+            )
+
+        return True
+
 
 class MakeKernel(Step):
 
