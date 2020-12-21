@@ -522,6 +522,8 @@ class Step:
         self._output_path = output_path or os.path.join(kdir, 'build')
         if not os.path.exists(self._output_path):
             os.mkdir(self._output_path)
+        self._install_path = os.path.join(self._output_path, '_install_')
+        self._create_install_dir()
         self._bmeta_path = os.path.join(self._output_path, 'bmeta.json')
         self._steps_path = os.path.join(self._output_path, 'steps.json')
         self._bmeta = self._load_json(self._bmeta_path, dict())
@@ -536,6 +538,11 @@ class Step:
         """Path to the build meta-data JSON file"""
         return self._bmeta_path
 
+    @property
+    def install_path(self):
+        """Path to the installation directory"""
+        return self._install_path
+
     def _load_json(self, json_path, default):
         data = default
         if os.path.exists(json_path):
@@ -545,6 +552,12 @@ class Step:
                 with open(json_path) as json_file:
                     data = json.load(json_file)
         return data
+
+    def _create_install_dir(self):
+        if self._reset:
+            shutil.rmtree(self._install_path, ignore_errors=True)
+        if not os.path.exists(self._install_path):
+            os.makedirs(self._install_path)
 
     def _add_run_step(self, name, jopt=None, status=None):
         start_time = datetime.fromtimestamp(self._start_time).isoformat()
@@ -670,6 +683,15 @@ class Step:
             cmd = self._output_to_file(cmd, self._log_path)
         return shell_cmd(cmd, True)
 
+    def _install_file(self, path, dest_name=None, verbose=False):
+        if path and os.path.exists(path):
+            if dest_name is None:
+                dest_name = os.path.basename(path)
+            dest_path = os.path.join(self._install_path, dest_name)
+            if verbose:
+                print("Installing {}".format(dest_path))
+            shutil.copy(path, dest_path)
+
     def is_enabled(self):
         """Determine whether the step is enabled with the current kernel."""
         return True
@@ -677,6 +699,12 @@ class Step:
     def run(self):
         """Abstract method to run the build step."""
         raise NotImplementedError("Step.run() needs to be implemented.")
+
+    def install(self, verbose=False):
+        """Base method to install the build artifacts."""
+        for path in [self._log_path, self._bmeta_path, self._steps_path]:
+            self._install_file(path, verbose=verbose)
+        return True
 
 
 class RevisionData(Step):
