@@ -805,7 +805,7 @@ class MakeConfig(Step):
                 kci_frag.write(config + '\n')
             for name, path in fragments.items():
                 with open(path) as frag:
-                    kci_frag.write("\n# fragment from : {}\n".format(name))
+                    kci_frag.write("\n# fragment from: {}\n".format(name))
                     kci_frag.writelines(frag)
 
     def _merge_config(self, kci_frag_name, verbose=False):
@@ -880,6 +880,20 @@ scripts/kconfig/merge_config.sh -O {output} '{base}' '{frag}' {redir}
         self._add_run_step('config', res, jopt)
         self._save_bmeta()
         return res
+
+    def install(self, verbose=False):
+        super().install(verbose)
+
+        self._install_file(
+            os.path.join(self._output_path, '.config'),
+            'kernel.config',
+            verbose
+        )
+
+        for frag in self._bmeta['kernel'].get('fragments', list()):
+            self._install_file(
+                os.path.join(self._output_path, frag), frag, verbose
+            )
 
 
 class MakeKernel(Step):
