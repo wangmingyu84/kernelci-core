@@ -554,7 +554,7 @@ class Step:
         if not os.path.exists(self._install_path):
             os.makedirs(self._install_path)
 
-    def _add_run_step(self, name, jopt=None, status=None):
+    def _add_run_step(self, name, status, jopt=None):
         start_time = datetime.fromtimestamp(self._start_time).isoformat()
         run_data = {
             'name': name,
@@ -564,10 +564,9 @@ class Step:
         }
         if jopt is not None:
             run_data['threads'] = str(jopt)
-        if status is not None:
-            run_data['status'] = "PASS" if status is True else "FAIL"
         if self._log_path and os.path.exists(self._log_path):
             run_data['log_file'] = self._log_file
+        run_data['status'] = "PASS" if status is True else "FAIL"
         self._steps.append(run_data)
 
         total_duration = sum(s['duration'] for s in self._steps)
@@ -723,7 +722,7 @@ class RevisionData(Step):
             'describe_v': git_describe_verbose(self._kdir),
             'commit': head_commit(self._kdir),
         }
-        self._add_run_step('revision', status=True)
+        self._add_run_step('revision', True)
         self._save_bmeta()
         return True
 
@@ -762,7 +761,7 @@ class EnvironmentData(Step):
             'use_ccache': shell_cmd("which ccache > /dev/null", True),
             'make_opts': make_opts,
         }
-        self._add_run_step('environment', status=True)
+        self._add_run_step('environment', True)
         self._save_bmeta()
         return True
 
@@ -870,7 +869,7 @@ scripts/kconfig/merge_config.sh -O {output} '{base}' '{frag}' {redir}
             self._bmeta['kernel']['fragments'] = [kci_frag_name]
             res = self._merge_config(kci_frag_name, verbose)
 
-        self._add_run_step('config', jopt, res)
+        self._add_run_step('config', res, jopt)
         self._save_bmeta()
         return res
 
@@ -907,7 +906,7 @@ class MakeKernel(Step):
                 kbmeta.update(vmlinux_meta)
                 kbmeta['vmlinux_file_size'] = os.stat(vmlinux_file).st_size
 
-        self._add_run_step('kernel', jopt, res)
+        self._add_run_step('kernel', res, jopt)
         self._save_bmeta()
         return res
 
@@ -951,7 +950,7 @@ class MakeModules(Step):
             }
             res = self._make('modules_install', jopt, verbose, opts)
 
-        self._add_run_step('modules', jopt, res)
+        self._add_run_step('modules', res, jopt)
         self._save_bmeta()
         return res
 
@@ -998,7 +997,7 @@ class MakeDeviceTrees(Step):
         res = self._make('dtbs', jopt, verbose)
         if res:
             self._dtbs_json()
-        self._add_run_step('dtbs', jopt, res)
+        self._add_run_step('dtbs', res, jopt)
         self._save_bmeta()
         return res
 
