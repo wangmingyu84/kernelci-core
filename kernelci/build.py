@@ -994,6 +994,18 @@ class MakeModules(Step):
         """
         return self._kernel_config_enabled('MODULES')
 
+    def _make_modules_install(self, jopt, verbose):
+        if os.path.exists(self._mod_path):
+            shutil.rmtree(self._mod_path)
+        os.makedirs(self._mod_path)
+        cross_compile = self._bmeta['environment']['cross_compile']
+        opts = {
+            'INSTALL_MOD_PATH': os.path.abspath(self._mod_path),
+            'INSTALL_MOD_STRIP': '1',
+            'STRIP': "{}strip".format(cross_compile),
+        }
+        return self._make('modules_install', jopt, verbose, opts)
+
     def run(self, jopt=None, verbose=False):
         """Make the kernel modules
 
@@ -1005,18 +1017,8 @@ class MakeModules(Step):
         *verbose* is whether the build output should be shown
         """
         res = self._make('modules', jopt, verbose)
-
         if res:
-            if os.path.exists(self._mod_path):
-                shutil.rmtree(self._mod_path)
-            os.makedirs(self._mod_path)
-            cross_compile = self._bmeta['environment']['cross_compile']
-            opts = {
-                'INSTALL_MOD_PATH': os.path.abspath(self._mod_path),
-                'INSTALL_MOD_STRIP': '1',
-                'STRIP': "{}strip".format(cross_compile),
-            }
-            res = self._make('modules_install', jopt, verbose, opts)
+            res = self._make_modules_install(jopt, verbose)
 
         self._add_run_step('modules', res, jopt)
         self._save_bmeta()
