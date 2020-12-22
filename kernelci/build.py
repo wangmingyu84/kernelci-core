@@ -1143,6 +1143,20 @@ class MakeSelftests(Step):
         self._save_bmeta()
         return res
 
+    def install(self, verbose=False):
+        if not super().install(verbose):
+            return False
+
+        kselftest_tarball = os.path.join(
+            self._output_path,
+            'kselftest/kselftest_install/kselftest-packages/kselftest.tar.xz'
+        )
+
+        if os.path.exists(kselftest_tarball):
+            self._install_file(kselftest_tarball, verbose=verbose)
+
+        return True
+
 
 def _make_defconfig(defconfig, kwargs, extras, verbose, log_file):
     kdir, output_path = (kwargs.get(k) for k in ('kdir', 'output'))
