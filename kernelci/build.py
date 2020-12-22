@@ -1006,6 +1006,16 @@ class MakeModules(Step):
         }
         return self._make('modules_install', jopt, verbose, opts)
 
+    def _create_modules_json(self, mod_json):
+        modules = []
+        for root, _, files in os.walk(self._mod_path):
+            rel_path = os.path.relpath(self._kdir)
+            for fname in fnmatch.filter(files, '*.ko'):
+                module_path = os.path.join(rel_path, fname)
+                modules.append(module_path)
+        with open(mod_json, 'w') as json_file:
+            json.dump({'modules': sorted(modules)}, json_file, indent=4)
+
     def run(self, jopt=None, verbose=False):
         """Make the kernel modules
 
@@ -1023,6 +1033,25 @@ class MakeModules(Step):
         self._add_run_step('modules', res, jopt)
         self._save_bmeta()
         return res
+
+    def install(self, verbose=False):
+        if not super().install(verbose):
+            return False
+
+        mod_json = os.path.join(self._install_path, 'modules.json')
+        if verbose:
+            print("Creating {}".format(mod_json))
+        self._create_modules_json(mod_json)
+
+        modules_tarball = 'modules.tar.xz'
+        modules_tarball_path = os.path.join(
+            self._install_path, modules_tarball)
+        if verbose:
+            print("Creating {}".format(modules_tarball_path))
+        shell_cmd("tar -C{path} -cJf {tarball} .".format(
+            path=self._mod_path, tarball=modules_tarball_path))
+
+        return True
 
 
 class MakeDeviceTrees(Step):
