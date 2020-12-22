@@ -48,14 +48,14 @@ MAKE_TARGETS = {
 
 # Hard-coded binary kernel image names for each CPU architecture
 KERNEL_IMAGE_NAMES = {
-    'arm': ['zImage', 'xipImage'],
-    'arm64': ['Image'],
-    'arc': ['uImage'],
-    'i386': ['bzImage'],
-    'mips': ['uImage.gz', 'vmlinux.gz.itb', 'vmlinuz'],
-    'riscv': ['Image', 'Image.gz'],
-    'x86_64': ['bzImage'],
-    'x86': ['bzImage'],
+    'arm': {'zImage', 'xipImage'},
+    'arm64': {'Image'},
+    'arc': {'uImage'},
+    'i386': {'bzImage'},
+    'mips': {'uImage.gz', 'vmlinux.gz.itb', 'vmlinuz'},
+    'riscv': {'Image', 'Image.gz'},
+    'x86_64': {'bzImage'},
+    'x86': {'bzImage'},
 }
 
 
@@ -931,6 +931,52 @@ class MakeKernel(Step):
         self._add_run_step('kernel', res, jopt)
         self._save_bmeta()
         return res
+
+    def _find_kernel_images(self, image):
+        arch = self._bmeta['environment']['arch']
+        boot_dir = os.path.join(self._output_path, 'arch', arch, 'boot')
+        kimage_names = KERNEL_IMAGE_NAMES[arch]
+        kimages = dict()
+
+        if image:
+            kimage_names.add(image)
+
+        for path in boot_dir, self._output_path:
+            files = set(os.listdir(path))
+            image_files = files.intersection(kimage_names)
+            kimages.update({im: os.path.join(path, im) for im in image_files})
+
+        return kimages
+
+    def install(self, verbose=False):
+        if not super().install(verbose):
+            return False
+
+        kbmeta = self._bmeta['kernel']
+
+        system_map = os.path.join(self._output_path, 'System.map')
+        if os.path.exists(system_map):
+            text = shell_cmd('grep " _text" {}'.format(system_map)).split()[0]
+            text_offset = int(text, 16) & (1 << 30)-1  # phys: cap at 1G
+            self._install_file(system_map, 'System.map', verbose)
+            kbmeta.update({
+                'system_map': 'System.map',
+                'text_offset': '0x{:08x}'.format(text_offset),
+            })
+
+        image = kbmeta.get('image')
+        kimages = self._find_kernel_images(image)
+        if not kimages:
+            print_flush("No kernel image found")
+            return False
+
+        if image not in kimages:
+            image = sorted(kimages.keys())[0]
+            kbmeta['image'] = image
+
+        self._install_file(kimages[image], image, verbose)
+
+        return True
 
 
 class MakeModules(Step):
