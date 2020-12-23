@@ -48,14 +48,14 @@ MAKE_TARGETS = {
 
 # Hard-coded binary kernel image names for each CPU architecture
 KERNEL_IMAGE_NAMES = {
-    'arm': ['zImage', 'xipImage'],
-    'arm64': ['Image'],
-    'arc': ['uImage'],
-    'i386': ['bzImage'],
-    'mips': ['uImage.gz', 'vmlinux.gz.itb', 'vmlinuz'],
-    'riscv': ['Image', 'Image.gz'],
-    'x86_64': ['bzImage'],
-    'x86': ['bzImage'],
+    'arm': {'zImage', 'xipImage'},
+    'arm64': {'Image'},
+    'arc': {'uImage'},
+    'i386': {'bzImage'},
+    'mips': {'uImage.gz', 'vmlinux.gz.itb', 'vmlinuz'},
+    'riscv': {'Image', 'Image.gz'},
+    'x86_64': {'bzImage'},
+    'x86': {'bzImage'},
 }
 
 
@@ -522,6 +522,8 @@ class Step:
         self._output_path = output_path or os.path.join(kdir, 'build')
         if not os.path.exists(self._output_path):
             os.mkdir(self._output_path)
+        self._install_path = os.path.join(self._output_path, '_install_')
+        self._create_install_dir()
         self._bmeta_path = os.path.join(self._output_path, 'bmeta.json')
         self._steps_path = os.path.join(self._output_path, 'steps.json')
         self._bmeta = self._load_json(self._bmeta_path, dict())
@@ -532,9 +534,9 @@ class Step:
         self._start_time = time.time()
 
     @property
-    def bmeta_path(self):
-        """Path to the build meta-data JSON file"""
-        return self._bmeta_path
+    def install_path(self):
+        """Path to the installation directory"""
+        return self._install_path
 
     def _load_json(self, json_path, default):
         data = default
@@ -546,7 +548,13 @@ class Step:
                     data = json.load(json_file)
         return data
 
-    def _add_run_step(self, name, jopt=None, status=None):
+    def _create_install_dir(self):
+        if self._reset:
+            shutil.rmtree(self._install_path, ignore_errors=True)
+        if not os.path.exists(self._install_path):
+            os.makedirs(self._install_path)
+
+    def _add_run_step(self, name, status, jopt=None):
         start_time = datetime.fromtimestamp(self._start_time).isoformat()
         run_data = {
             'name': name,
@@ -556,10 +564,9 @@ class Step:
         }
         if jopt is not None:
             run_data['threads'] = str(jopt)
-        if status is not None:
-            run_data['status'] = "PASS" if status is True else "FAIL"
         if self._log_path and os.path.exists(self._log_path):
             run_data['log_file'] = self._log_file
+        run_data['status'] = "PASS" if status is True else "FAIL"
         self._steps.append(run_data)
 
         total_duration = sum(s['duration'] for s in self._steps)
@@ -670,6 +677,15 @@ class Step:
             cmd = self._output_to_file(cmd, self._log_path)
         return shell_cmd(cmd, True)
 
+    def _install_file(self, path, dest_name=None, verbose=False):
+        if path and os.path.exists(path):
+            if dest_name is None:
+                dest_name = os.path.basename(path)
+            dest_path = os.path.join(self._install_path, dest_name)
+            if verbose:
+                print("Installing {}".format(dest_path))
+            shutil.copy(path, dest_path)
+
     def is_enabled(self):
         """Determine whether the step is enabled with the current kernel."""
         return True
@@ -677,6 +693,12 @@ class Step:
     def run(self):
         """Abstract method to run the build step."""
         raise NotImplementedError("Step.run() needs to be implemented.")
+
+    def install(self, verbose=False):
+        """Base method to install the build artifacts."""
+        for path in [self._log_path, self._bmeta_path, self._steps_path]:
+            self._install_file(path, verbose=verbose)
+        return True
 
 
 class RevisionData(Step):
@@ -700,7 +722,7 @@ class RevisionData(Step):
             'describe_v': git_describe_verbose(self._kdir),
             'commit': head_commit(self._kdir),
         }
-        self._add_run_step('revision', status=True)
+        self._add_run_step('revision', True)
         self._save_bmeta()
         return True
 
@@ -739,7 +761,7 @@ class EnvironmentData(Step):
             'use_ccache': shell_cmd("which ccache > /dev/null", True),
             'make_opts': make_opts,
         }
-        self._add_run_step('environment', status=True)
+        self._add_run_step('environment', True)
         self._save_bmeta()
         return True
 
@@ -847,9 +869,26 @@ scripts/kconfig/merge_config.sh -O {output} '{base}' '{frag}' {redir}
             self._bmeta['kernel']['fragments'] = [kci_frag_name]
             res = self._merge_config(kci_frag_name, verbose)
 
-        self._add_run_step('config', jopt, res)
+        self._add_run_step('config', res, jopt)
         self._save_bmeta()
         return res
+
+    def install(self, verbose=False):
+        if not super().install(verbose):
+            return False
+
+        self._install_file(
+            os.path.join(self._output_path, '.config'),
+            'kernel.config',
+            verbose
+        )
+
+        for frag in self._bmeta['kernel'].get('fragments', list()):
+            self._install_file(
+                os.path.join(self._output_path, frag), frag, verbose
+            )
+
+        return True
 
 
 class MakeKernel(Step):
@@ -869,11 +908,11 @@ class MakeKernel(Step):
         elif self._kernel_config_enabled('SYS_SUPPORTS_ZBOOT'):
             target = 'vmlinuz'
         else:
-            env = self._bmeta['environment']
-            target = MAKE_TARGETS.get(env['arch'])
+            target = MAKE_TARGETS.get(self._bmeta['environment']['arch'])
 
         kbmeta = self._bmeta.setdefault('kernel', dict())
-        kbmeta['image'] = target
+        if target:
+            kbmeta['image'] = target
 
         res = self._make(target, jopt, verbose)
 
@@ -884,9 +923,55 @@ class MakeKernel(Step):
                 kbmeta.update(vmlinux_meta)
                 kbmeta['vmlinux_file_size'] = os.stat(vmlinux_file).st_size
 
-        self._add_run_step('kernel', jopt, res)
+        self._add_run_step('kernel', res, jopt)
         self._save_bmeta()
         return res
+
+    def _find_kernel_images(self, image):
+        arch = self._bmeta['environment']['arch']
+        boot_dir = os.path.join(self._output_path, 'arch', arch, 'boot')
+        kimage_names = KERNEL_IMAGE_NAMES[arch]
+        kimages = dict()
+
+        if image:
+            kimage_names.add(image)
+
+        for path in boot_dir, self._output_path:
+            files = set(os.listdir(path))
+            image_files = files.intersection(kimage_names)
+            kimages.update({im: os.path.join(path, im) for im in image_files})
+
+        return kimages
+
+    def install(self, verbose=False):
+        if not super().install(verbose):
+            return False
+
+        kbmeta = self._bmeta['kernel']
+
+        system_map = os.path.join(self._output_path, 'System.map')
+        if os.path.exists(system_map):
+            text = shell_cmd('grep " _text" {}'.format(system_map)).split()[0]
+            text_offset = int(text, 16) & (1 << 30)-1  # phys: cap at 1G
+            self._install_file(system_map, 'System.map', verbose)
+            kbmeta.update({
+                'system_map': 'System.map',
+                'text_offset': '0x{:08x}'.format(text_offset),
+            })
+
+        image = kbmeta.get('image')
+        kimages = self._find_kernel_images(image)
+        if not kimages:
+            print_flush("No kernel image found")
+            return False
+
+        if image not in kimages:
+            image = sorted(kimages.keys())[0]
+            kbmeta['image'] = image
+
+        self._install_file(kimages[image], image, verbose)
+
+        return True
 
 
 class MakeModules(Step):
@@ -904,6 +989,28 @@ class MakeModules(Step):
         """
         return self._kernel_config_enabled('MODULES')
 
+    def _make_modules_install(self, jopt, verbose):
+        if os.path.exists(self._mod_path):
+            shutil.rmtree(self._mod_path)
+        os.makedirs(self._mod_path)
+        cross_compile = self._bmeta['environment']['cross_compile']
+        opts = {
+            'INSTALL_MOD_PATH': os.path.abspath(self._mod_path),
+            'INSTALL_MOD_STRIP': '1',
+            'STRIP': "{}strip".format(cross_compile),
+        }
+        return self._make('modules_install', jopt, verbose, opts)
+
+    def _create_modules_json(self, mod_json):
+        modules = []
+        for root, _, files in os.walk(self._mod_path):
+            rel_path = os.path.relpath(self._kdir)
+            for fname in fnmatch.filter(files, '*.ko'):
+                module_path = os.path.join(rel_path, fname)
+                modules.append(module_path)
+        with open(mod_json, 'w') as json_file:
+            json.dump({'modules': sorted(modules)}, json_file, indent=4)
+
     def run(self, jopt=None, verbose=False):
         """Make the kernel modules
 
@@ -915,22 +1022,31 @@ class MakeModules(Step):
         *verbose* is whether the build output should be shown
         """
         res = self._make('modules', jopt, verbose)
-
         if res:
-            if os.path.exists(self._mod_path):
-                shutil.rmtree(self._mod_path)
-            os.makedirs(self._mod_path)
-            cross_compile = self._bmeta['environment']['cross_compile']
-            opts = {
-                'INSTALL_MOD_PATH': os.path.abspath(self._mod_path),
-                'INSTALL_MOD_STRIP': '1',
-                'STRIP': "{}strip".format(cross_compile),
-            }
-            res = self._make('modules_install', jopt, verbose, opts)
+            res = self._make_modules_install(jopt, verbose)
 
-        self._add_run_step('modules', jopt, res)
+        self._add_run_step('modules', res, jopt)
         self._save_bmeta()
         return res
+
+    def install(self, verbose=False):
+        if not super().install(verbose):
+            return False
+
+        mod_json = os.path.join(self._install_path, 'modules.json')
+        if verbose:
+            print("Creating {}".format(mod_json))
+        self._create_modules_json(mod_json)
+
+        modules_tarball = 'modules.tar.xz'
+        modules_tarball_path = os.path.join(
+            self._install_path, modules_tarball)
+        if verbose:
+            print("Creating {}".format(modules_tarball_path))
+        shell_cmd("tar -C{path} -cJf {tarball} .".format(
+            path=self._mod_path, tarball=modules_tarball_path))
+
+        return True
 
 
 class MakeDeviceTrees(Step):
@@ -944,12 +1060,35 @@ class MakeDeviceTrees(Step):
         """
         return self._kernel_config_enabled('OF_FLATTREE')
 
-    def _dtbs_json(self):
+    def run(self, jopt=None, verbose=False):
+        """Make the device trees
+
+        Make the device tree binary files (dtbs).  This step does not add any
+        extra build meta-data.
+
+        *jopt* is the `make -j` option which will default to `nproc + 2`
+        *verbose* is whether the build output should be shown
+        """
+        res = self._make('dtbs', jopt, verbose)
+        self._add_run_step('dtbs', res, jopt)
+        self._save_bmeta()
+        return res
+
+    def install(self, verbose=False):
+        if not super().install(verbose):
+            return False
+
         arch = self._bmeta['environment']['arch']
         boot_dir = os.path.join(self._output_path, 'arch', arch, 'boot')
         dts_dir = os.path.join(boot_dir, 'dts')
-        dtbs_path = os.path.join(self._output_path, '_dtbs_')
         dtb_list = []
+
+        dtbs_path = os.path.join(self._install_path, 'dtbs')
+        if os.path.exists(dtbs_path):
+            shutil.rmtree(dtbs_path)
+
+        if verbose:
+            print("Copying dtbs to {}".format(dtbs_path))
         for root, _, files in os.walk(dts_dir):
             for f in fnmatch.filter(files, '*.dtb'):
                 dtb_path = os.path.join(root, f)
@@ -960,24 +1099,14 @@ class MakeDeviceTrees(Step):
                 if not os.path.exists(dest_dir):
                     os.makedirs(dest_dir)
                 shutil.copy(dtb_path, dest_path)
-        with open(os.path.join(self._output_path, 'dtbs.json'), 'w') as f:
-            json.dump({'dtbs': sorted(dtb_list)}, f, indent=4)
 
-    def run(self, jopt=None, verbose=False):
-        """Make the device trees
+        dtbs_json = os.path.join(self._install_path, 'dtbs.json')
+        if verbose:
+            print("Creating {}".format(dtbs_json))
+        with open(dtbs_json, 'w') as json_file:
+            json.dump({'dtbs': sorted(dtb_list)}, json_file, indent=4)
 
-        Make the device tree binary files (dtbs).  This step does not add any
-        extrabuild meta-data.
-
-        *jopt* is the `make -j` option which will default to `nproc + 2`
-        *verbose* is whether the build output should be shown
-        """
-        res = self._make('dtbs', jopt, verbose)
-        if res:
-            self._dtbs_json()
-        self._add_run_step('dtbs', jopt, res)
-        self._save_bmeta()
-        return res
+        return True
 
 
 class MakeSelftests(Step):
@@ -1007,6 +1136,20 @@ class MakeSelftests(Step):
         self._add_run_step('kselftest', jopt, res)
         self._save_bmeta()
         return res
+
+    def install(self, verbose=False):
+        if not super().install(verbose):
+            return False
+
+        kselftest_tarball = os.path.join(
+            self._output_path,
+            'kselftest/kselftest_install/kselftest-packages/kselftest.tar.xz'
+        )
+
+        if os.path.exists(kselftest_tarball):
+            self._install_file(kselftest_tarball, verbose=verbose)
+
+        return True
 
 
 def _make_defconfig(defconfig, kwargs, extras, verbose, log_file):
