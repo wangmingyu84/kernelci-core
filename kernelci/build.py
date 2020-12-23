@@ -530,6 +530,7 @@ class Step:
         self._log_path = os.path.join(self._output_path, log) if log else None
         self._dot_config = None
         self._start_time = time.time()
+        self._status = None
 
     @property
     def bmeta_path(self):
@@ -558,7 +559,8 @@ class Step:
             run_data['threads'] = str(jopt)
         if self._log_path and os.path.exists(self._log_path):
             run_data['log_file'] = self._log_file
-        run_data['status'] = "PASS" if status is True else "FAIL"
+        self._status = status and self._status is not False
+        run_data['status'] = "PASS" if self._status is True else "FAIL"
         self._steps.append(run_data)
 
         total_duration = sum(s['duration'] for s in self._steps)
