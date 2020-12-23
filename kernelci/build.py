@@ -518,40 +518,33 @@ class Step:
         *reset* is whether the meta-data should be reset in this step
         """
         self._kdir = kdir
+        self._reset = reset
         self._output_path = output_path or os.path.join(kdir, 'build')
-        self._bmeta_path = os.path.join(self._output_path, 'bmeta.json')
-        self._steps_path = os.path.join(self._output_path, 'steps.json')
-        self._log_file = log
-        self._log_path = os.path.join(self._output_path, log) if log else None
-        self._bmeta = dict()
-        self._steps = list()
-        self._dot_config = None
-        self._start_time = time.time()
         if not os.path.exists(self._output_path):
             os.mkdir(self._output_path)
-        elif reset:
-            self._reset_bmeta()
-        else:
-            self._load_bmeta()
+        self._bmeta_path = os.path.join(self._output_path, 'bmeta.json')
+        self._steps_path = os.path.join(self._output_path, 'steps.json')
+        self._bmeta = self._load_json(self._bmeta_path, dict())
+        self._steps = self._load_json(self._steps_path, list())
+        self._log_file = log
+        self._log_path = os.path.join(self._output_path, log) if log else None
+        self._dot_config = None
+        self._start_time = time.time()
 
     @property
     def bmeta_path(self):
         """Path to the build meta-data JSON file"""
         return self._bmeta_path
 
-    def _reset_bmeta(self):
-        if os.path.exists(self._bmeta_path):
-            os.unlink(self._bmeta_path)
-        if os.path.exists(self._steps_path):
-            os.unlink(self._steps_path)
-
-    def _load_bmeta(self):
-        if os.path.exists(self._bmeta_path):
-            with open(self._bmeta_path) as json_file:
-                self._bmeta = json.load(json_file)
-        if os.path.exists(self._steps_path):
-            with open(self._steps_path) as json_file:
-                self._steps = json.load(json_file)
+    def _load_json(self, json_path, default):
+        data = default
+        if os.path.exists(json_path):
+            if self._reset:
+                os.unlink(json_path)
+            else:
+                with open(json_path) as json_file:
+                    data = json.load(json_file)
+        return data
 
     def _add_run_step(self, name, jopt=None, status=None):
         start_time = datetime.fromtimestamp(self._start_time).isoformat()
@@ -676,6 +669,10 @@ class Step:
         if self._log_path:
             cmd = self._output_to_file(cmd, self._log_path)
         return shell_cmd(cmd, True)
+
+    def is_enabled(self):
+        """Determine whether the step is enabled with the current kernel."""
+        return True
 
     def run(self):
         """Abstract method to run the build step."""
@@ -894,7 +891,11 @@ class MakeKernel(Step):
 
 class MakeModules(Step):
 
-    def modules_enabled(self):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._mod_path = os.path.join(self._output_path, '_modules_')
+
+    def is_enabled(self):
         """Check whether modules are enabled.
 
         Return True if the modules are enabled in the kernel config file, or
@@ -903,28 +904,25 @@ class MakeModules(Step):
         """
         return self._kernel_config_enabled('MODULES')
 
-    def run(self, mod_path=None, jopt=None, verbose=False):
+    def run(self, jopt=None, verbose=False):
         """Make the kernel modules
 
-        Make the kernel modules and install them as stripped binaries in
-        *mod_path*, which defaults to _modules_ within the output directory.
-        This step does not add any extra build meta-data.
+        Make the kernel modules and install them as stripped binaries in a
+        _modules_ output sub-directory.  This step does not add any extra build
+        meta-data.
 
-        *mod_path* is the path to the output kernel modules directory.
         *jopt* is the `make -j` option which will default to `nproc + 2`
         *verbose* is whether the build output should be shown
         """
         res = self._make('modules', jopt, verbose)
 
         if res:
-            if not mod_path:
-                mod_path = os.path.join(self._output_path, '_modules_')
-            if os.path.exists(mod_path):
-                shutil.rmtree(mod_path)
-            os.makedirs(mod_path)
+            if os.path.exists(self._mod_path):
+                shutil.rmtree(self._mod_path)
+            os.makedirs(self._mod_path)
             cross_compile = self._bmeta['environment']['cross_compile']
             opts = {
-                'INSTALL_MOD_PATH': os.path.abspath(mod_path),
+                'INSTALL_MOD_PATH': os.path.abspath(self._mod_path),
                 'INSTALL_MOD_STRIP': '1',
                 'STRIP': "{}strip".format(cross_compile),
             }
@@ -937,7 +935,7 @@ class MakeModules(Step):
 
 class MakeDeviceTrees(Step):
 
-    def dt_enabled(self):
+    def is_enabled(self):
         """Check whether device tree support is enabled.
 
         Return True if device tree support is enabled in the kernel config, or
@@ -984,7 +982,7 @@ class MakeDeviceTrees(Step):
 
 class MakeSelftests(Step):
 
-    def fragment_enabled(self):
+    def is_enabled(self):
         """Check whether the kselftest fragment is enabled
 
         Return True if the kselftest config fragment is enabled in the build
